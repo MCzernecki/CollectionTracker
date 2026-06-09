@@ -1,0 +1,15 @@
+## Interface: 120000
+## Title: CollectionTracker
+## Notes: Modular collection tracking addon shell for World of Warcraft Retail.
+## Author: Czernek
+## Version: 0.1.0
+## SavedVariables: CollectionTrackerDB
+
+Core.lua
+Data/MountData.lua
+Modules/Gold.lua
+Modules/Mounts.lua
+Modules/Pets.lua
+Modules/Toys.lua
+Modules/Transmog.lua
+UI.lua
