@@ -15,6 +15,8 @@ CollectionTracker.defaults = {
         relativePoint = "CENTER",
         x = 0,
         y = 0,
+        width = 900,
+        height = 550,
     },
 }
 

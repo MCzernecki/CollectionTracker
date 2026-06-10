@@ -11,6 +11,55 @@ local TAB_DEFINITIONS = {
     { key = "transmog", title = "Transmog" },
 }
 
+local MIN_WINDOW_WIDTH = 900
+local MIN_WINDOW_HEIGHT = 550
+
+local function SetSolidTexture(texture, red, green, blue, alpha)
+    if texture.SetColorTexture then
+        texture:SetColorTexture(red, green, blue, alpha)
+    else
+        texture:SetTexture("Interface\\Buttons\\WHITE8X8")
+        texture:SetVertexColor(red, green, blue, alpha)
+    end
+end
+
+function UI:ClampWindowSize()
+    if not self.frame then
+        return
+    end
+
+    local width, height = self.frame:GetSize()
+    local clampedWidth = math.max(width or MIN_WINDOW_WIDTH, MIN_WINDOW_WIDTH)
+    local clampedHeight = math.max(height or MIN_WINDOW_HEIGHT, MIN_WINDOW_HEIGHT)
+
+    if clampedWidth ~= width or clampedHeight ~= height then
+        self.frame:SetSize(clampedWidth, clampedHeight)
+    end
+end
+
+function UI:RestoreSize()
+    if not self.frame or not CollectionTracker.db then
+        return
+    end
+
+    local window = CollectionTracker.db.window
+    local width = math.max(tonumber(window.width) or MIN_WINDOW_WIDTH, MIN_WINDOW_WIDTH)
+    local height = math.max(tonumber(window.height) or MIN_WINDOW_HEIGHT, MIN_WINDOW_HEIGHT)
+
+    self.frame:SetSize(width, height)
+end
+
+function UI:SaveSize()
+    if not self.frame or not CollectionTracker.db then
+        return
+    end
+
+    local width, height = self.frame:GetSize()
+
+    CollectionTracker.db.window.width = math.max(math.floor((width or MIN_WINDOW_WIDTH) + 0.5), MIN_WINDOW_WIDTH)
+    CollectionTracker.db.window.height = math.max(math.floor((height or MIN_WINDOW_HEIGHT) + 0.5), MIN_WINDOW_HEIGHT)
+end
+
 -- Restores the frame position saved in CollectionTrackerDB.
 function UI:RestorePosition()
     if not self.frame or not CollectionTracker.db then
@@ -89,13 +138,21 @@ function UI:CreateMainWindow()
     end
 
     local frame = CreateFrame("Frame", "CollectionTrackerMainFrame", UIParent, "BackdropTemplate")
-    frame:SetSize(720, 460)
+    frame:SetSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
     frame:SetMovable(true)
+    if frame.SetResizable then
+        frame:SetResizable(true)
+    end
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
     frame:SetClampedToScreen(true)
+    if frame.SetResizeBounds then
+        frame:SetResizeBounds(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+    elseif frame.SetMinResize then
+        frame:SetMinResize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+    end
     frame:SetBackdrop({
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
         edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -127,6 +184,34 @@ function UI:CreateMainWindow()
     local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     closeButton:SetPoint("TOPRIGHT", -6, -6)
 
+    local resizeButton = CreateFrame("Button", nil, frame)
+    resizeButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -6, 6)
+    resizeButton:SetSize(16, 16)
+    resizeButton:EnableMouse(true)
+
+    local resizeTexture = resizeButton:CreateTexture(nil, "OVERLAY")
+    resizeTexture:SetAllPoints(resizeButton)
+    SetSolidTexture(resizeTexture, 1, 1, 1, 0.18)
+
+    local resizeHighlight = resizeButton:CreateTexture(nil, "HIGHLIGHT")
+    resizeHighlight:SetAllPoints(resizeButton)
+    SetSolidTexture(resizeHighlight, 1, 0.82, 0, 0.25)
+
+    resizeButton:SetScript("OnMouseDown", function()
+        if frame.StartSizing then
+            frame:StartSizing("BOTTOMRIGHT")
+        end
+    end)
+    resizeButton:SetScript("OnMouseUp", function()
+        frame:StopMovingOrSizing()
+        self:ClampWindowSize()
+        self:SaveSize()
+        self:SavePosition()
+    end)
+    frame:SetScript("OnHide", function()
+        frame:StopMovingOrSizing()
+    end)
+
     for index, tab in ipairs(TAB_DEFINITIONS) do
         local button = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
         button:SetSize(126, 26)
@@ -142,6 +227,7 @@ function UI:CreateMainWindow()
         self:CreateTabContent(tab.key)
     end
 
+    self:RestoreSize()
     self:RestorePosition()
     self:SelectTab("gold")
 

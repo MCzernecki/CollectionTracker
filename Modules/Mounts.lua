@@ -5,23 +5,31 @@ local Mounts = {}
 local DEFAULT_MOUNT_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 local ROW_HEIGHT = 28
 local ICON_SIZE = 20
-local DETAIL_ICON_SIZE = 42
-local DETAILS_HEIGHT = 138
+local DETAIL_ICON_SIZE = 52
+local OUTER_PADDING = 16
+local PANEL_GUTTER = 12
+local DETAILS_WIDTH_RATIO = 0.33
+local LIST_MIN_WIDTH = 540
+local DETAILS_MIN_WIDTH = 280
+local LIST_PANEL_PADDING = 8
+local SCROLLBAR_WIDTH = 28
 
 local LIST_COLUMNS = {
-    { key = "icon", title = "", width = 28 },
-    { key = "name", title = "Name", width = 130 },
-    { key = "expansion", title = "Expansion", width = 86 },
-    { key = "sourceType", title = "Type", width = 70 },
-    { key = "sourceName", title = "Source", width = 150 },
-    { key = "dropChance", title = "Drop", width = 44, justifyH = "RIGHT" },
-    { key = "collected", title = "Status", width = 72 },
-    { key = "attempts", title = "Attempts", width = 56, justifyH = "RIGHT" },
+    { key = "icon", title = "", minWidth = 26 },
+    { key = "name", title = "Name", minWidth = 100, flex = 2 },
+    { key = "expansion", title = "Expansion", minWidth = 66, flex = 1 },
+    { key = "sourceType", title = "Type", minWidth = 54, flex = 1 },
+    { key = "sourceName", title = "Source", minWidth = 100, flex = 2 },
+    { key = "dropChance", title = "Drop", minWidth = 42, justifyH = "RIGHT" },
+    { key = "collected", title = "Status", minWidth = 58 },
+    { key = "attempts", title = "Attempts", minWidth = 50, justifyH = "RIGHT" },
 }
 
-local LIST_WIDTH = 0
+local LIST_MIN_INNER_WIDTH = 0
+local LIST_FLEX_TOTAL = 0
 for _, column in ipairs(LIST_COLUMNS) do
-    LIST_WIDTH = LIST_WIDTH + column.width
+    LIST_MIN_INNER_WIDTH = LIST_MIN_INNER_WIDTH + column.minWidth
+    LIST_FLEX_TOTAL = LIST_FLEX_TOTAL + (column.flex or 0)
 end
 
 local STATUS_COLORS = {
@@ -46,6 +54,20 @@ local function DisplayText(value)
     end
 
     return tostring(value)
+end
+
+local function FormatDropChance(value)
+    local dropChance = tonumber(value)
+
+    if not dropChance then
+        return nil
+    end
+
+    return string.format("%g%%", dropChance)
+end
+
+local function DisplayDropChance(value)
+    return FormatDropChance(value) or "-"
 end
 
 local function DetailLine(label, value)
@@ -125,20 +147,102 @@ function Mounts:SetStatusColor(fontString, status)
     fontString:SetTextColor(color[1], color[2], color[3], 1)
 end
 
-function Mounts:CreateHeader(parent)
+function Mounts:GetVisibleMounts()
+    return self:GetMounts()
+end
+
+function Mounts:CalculateColumnWidths(totalWidth)
+    totalWidth = math.max(math.floor(totalWidth or LIST_MIN_INNER_WIDTH), LIST_MIN_INNER_WIDTH)
+
+    local widths = {}
+    local extraWidth = math.max(totalWidth - LIST_MIN_INNER_WIDTH, 0)
+    local assignedWidth = 0
+
+    for _, column in ipairs(LIST_COLUMNS) do
+        local width = column.minWidth
+
+        if extraWidth > 0 and (column.flex or 0) > 0 and LIST_FLEX_TOTAL > 0 then
+            width = width + math.floor(extraWidth * column.flex / LIST_FLEX_TOTAL)
+        end
+
+        widths[column.key] = width
+        assignedWidth = assignedWidth + width
+    end
+
+    local remainder = totalWidth - assignedWidth
+    if remainder > 0 then
+        widths.sourceName = widths.sourceName + remainder
+    end
+
+    return widths
+end
+
+function Mounts:LayoutCells(frame, widths, isRow)
     local xOffset = 0
 
     for _, column in ipairs(LIST_COLUMNS) do
-        local cell = CreateCell(parent, "GameFontNormalSmall", xOffset, column.width, column.justifyH)
-        cell:SetText(column.title)
-        xOffset = xOffset + column.width
+        local cell = frame.cells and frame.cells[column.key]
+        local width = widths[column.key] or column.minWidth
+
+        if cell then
+            cell:ClearAllPoints()
+
+            if isRow and column.key == "icon" then
+                cell:SetPoint("LEFT", frame, "LEFT", xOffset + 3, 0)
+                cell:SetSize(math.min(ICON_SIZE, math.max(width - 6, 12)), ICON_SIZE)
+            else
+                cell:SetPoint("LEFT", frame, "LEFT", xOffset, 0)
+                cell:SetWidth(width)
+            end
+        end
+
+        xOffset = xOffset + width
+    end
+end
+
+function Mounts:ApplyListLayout()
+    if not self.listPanel then
+        return
+    end
+
+    local panelWidth = self.listPanel:GetWidth() or LIST_MIN_WIDTH
+    local listInnerWidth = math.max(math.floor(panelWidth - LIST_PANEL_PADDING - SCROLLBAR_WIDTH), LIST_MIN_INNER_WIDTH)
+    local widths = self:CalculateColumnWidths(listInnerWidth)
+
+    self.listInnerWidth = listInnerWidth
+    self.columnWidths = widths
+
+    if self.header then
+        self.header:SetWidth(listInnerWidth)
+        self:LayoutCells(self.header, widths, false)
+    end
+
+    if self.scrollChild then
+        local height = self.scrollChild:GetHeight() or ROW_HEIGHT
+        self.scrollChild:SetSize(listInnerWidth, math.max(height, ROW_HEIGHT))
+    end
+
+    for _, row in ipairs(self.rows or {}) do
+        row:SetWidth(listInnerWidth)
+        self:LayoutCells(row, widths, true)
+    end
+end
+
+function Mounts:CreateHeader(parent)
+    parent.cells = {}
+
+    local xOffset = 0
+    for _, column in ipairs(LIST_COLUMNS) do
+        parent.cells[column.key] = CreateCell(parent, "GameFontNormalSmall", xOffset, column.minWidth, column.justifyH)
+        parent.cells[column.key]:SetText(column.title)
+        xOffset = xOffset + column.minWidth
     end
 end
 
 function Mounts:CreateRow(index)
     local row = CreateFrame("Frame", nil, self.scrollChild)
     row:SetPoint("TOPLEFT", self.scrollChild, "TOPLEFT", 0, -((index - 1) * ROW_HEIGHT))
-    row:SetSize(LIST_WIDTH, ROW_HEIGHT)
+    row:SetSize(self.listInnerWidth or LIST_MIN_INNER_WIDTH, ROW_HEIGHT)
     row:EnableMouse(true)
     row.cells = {}
 
@@ -157,11 +261,11 @@ function Mounts:CreateRow(index)
     icon:SetSize(ICON_SIZE, ICON_SIZE)
     row.cells.icon = icon
 
-    local xOffset = LIST_COLUMNS[1].width
+    local xOffset = LIST_COLUMNS[1].minWidth
     for index = 2, #LIST_COLUMNS do
         local column = LIST_COLUMNS[index]
-        row.cells[column.key] = CreateCell(row, "GameFontHighlightSmall", xOffset, column.width, column.justifyH)
-        xOffset = xOffset + column.width
+        row.cells[column.key] = CreateCell(row, "GameFontHighlightSmall", xOffset, column.minWidth, column.justifyH)
+        xOffset = xOffset + column.minWidth
     end
 
     row:SetScript("OnMouseUp", function()
@@ -169,6 +273,9 @@ function Mounts:CreateRow(index)
     end)
 
     self.rows[index] = row
+    if self.columnWidths then
+        self:LayoutCells(row, self.columnWidths, true)
+    end
 
     return row
 end
@@ -195,7 +302,7 @@ function Mounts:PopulateRow(row, mount)
     row.cells.expansion:SetText(DisplayText(mount.expansion))
     row.cells.sourceType:SetText(DisplayText(mount.sourceType))
     row.cells.sourceName:SetText(DisplayText(mount.sourceName))
-    row.cells.dropChance:SetText(DisplayText(mount.dropChance))
+    row.cells.dropChance:SetText(DisplayDropChance(mount.dropChance))
     row.cells.collected:SetText(journalInfo.collectedStatus)
     row.cells.attempts:SetText(tostring(attempts))
     self:SetStatusColor(row.cells.collected, journalInfo.collectedStatus)
@@ -211,29 +318,128 @@ end
 
 function Mounts:BuildDetailsText(mount, journalInfo)
     local attempts = self:GetTotalAttempts(mount)
-    local details = {
-        DetailLine("Expansion", mount.expansion),
-        DetailLine("Source Type", mount.sourceType),
-        DetailLine("Source", mount.sourceName),
-        DetailLine("Boss", mount.bossName),
-        DetailLine("Encounter ID", mount.encounterID),
-        DetailLine("Item ID", mount.itemID),
-        DetailLine("Drop Chance", mount.dropChance),
-        DetailLine("Collected", journalInfo.collectedStatus),
-        DetailLine("Total Attempts", attempts),
-        "",
-        DetailLine("How to Obtain", mount.obtainMethod),
-        "",
-        DetailLine("Notes", mount.notes),
-    }
+    local details = {}
+    local dropChance = FormatDropChance(mount.dropChance)
+
+    table.insert(details, DetailLine("Expansion", mount.expansion))
+    table.insert(details, DetailLine("Source Type", mount.sourceType))
+    table.insert(details, DetailLine("Source", mount.sourceName))
+
+    if mount.bossName and mount.bossName ~= "" then
+        table.insert(details, DetailLine("Boss", mount.bossName))
+    end
+
+    if dropChance then
+        table.insert(details, DetailLine("Drop Chance", dropChance))
+    end
+
+    if mount.encounterID then
+        table.insert(details, DetailLine("Encounter ID", mount.encounterID))
+    end
+
+    if mount.itemID then
+        table.insert(details, DetailLine("Item ID", mount.itemID))
+    end
+
+    table.insert(details, DetailLine("Total Attempts", attempts))
+    table.insert(details, "")
+    table.insert(details, DetailLine("How to Obtain", mount.obtainMethod))
+    table.insert(details, "")
+    table.insert(details, DetailLine("Notes", mount.notes))
 
     return table.concat(details, "\n")
+end
+
+function Mounts:RefreshStats(mounts)
+    if not self.statTexts then
+        return
+    end
+
+    mounts = mounts or self:GetVisibleMounts()
+
+    local total = #mounts
+    local collected = 0
+
+    for _, mount in ipairs(mounts) do
+        local journalInfo = self:GetJournalInfo(mount)
+        if journalInfo.collectedStatus == "Collected" then
+            collected = collected + 1
+        end
+    end
+
+    local missing = math.max(total - collected, 0)
+    local completion = 0
+
+    if total > 0 then
+        completion = math.floor((collected / total) * 100 + 0.5)
+    end
+
+    self.statTexts.total:SetText(string.format("Total: %d", total))
+    self.statTexts.collected:SetText(string.format("Collected: %d", collected))
+    self.statTexts.missing:SetText(string.format("Missing: %d", missing))
+    self.statTexts.completion:SetText(string.format("Completion: %d%%", completion))
+end
+
+function Mounts:UpdateDetailsTextWidth()
+    if not self.detailsPanel or not self.detailsText or not self.detailsScrollChild then
+        return
+    end
+
+    local panelWidth = self.detailsPanel:GetWidth() or DETAILS_MIN_WIDTH
+    local textWidth = math.max(math.floor(panelWidth - 48), 160)
+
+    self.detailsScrollChild:SetWidth(textWidth)
+    self.detailsText:SetWidth(textWidth)
+end
+
+function Mounts:LayoutPanels()
+    print("CollectionTracker: LayoutPanels")
+    if not self.bodyFrame or not self.listPanel or not self.detailsPanel then
+        return
+    end
+
+    local width = self.bodyFrame:GetWidth() or 0
+    local height = self.bodyFrame:GetHeight() or 0
+    if width <= 0 or height <= 0 then
+        return
+    end
+
+    local detailsWidth = math.floor(width * DETAILS_WIDTH_RATIO)
+    local maxDetailsWidth = math.floor(width * 0.35)
+    local availableDetailsWidth = width - LIST_MIN_WIDTH - PANEL_GUTTER
+
+    detailsWidth = math.max(detailsWidth, DETAILS_MIN_WIDTH)
+    detailsWidth = math.min(detailsWidth, maxDetailsWidth)
+
+    if availableDetailsWidth > 0 then
+        detailsWidth = math.min(detailsWidth, availableDetailsWidth)
+    end
+
+    local listWidth = width - detailsWidth - PANEL_GUTTER
+    if listWidth < LIST_MIN_WIDTH and width > DETAILS_MIN_WIDTH + PANEL_GUTTER then
+        detailsWidth = math.max(width - LIST_MIN_WIDTH - PANEL_GUTTER, DETAILS_MIN_WIDTH)
+        listWidth = width - detailsWidth - PANEL_GUTTER
+    end
+
+    self.detailsPanel:ClearAllPoints()
+    self.detailsPanel:SetPoint("TOPRIGHT", self.bodyFrame, "TOPRIGHT", 0, 0)
+    self.detailsPanel:SetSize(math.max(detailsWidth, DETAILS_MIN_WIDTH), height)
+
+    self.listPanel:ClearAllPoints()
+    self.listPanel:SetPoint("TOPLEFT", self.bodyFrame, "TOPLEFT", 0, 0)
+    self.listPanel:SetSize(math.max(listWidth, 1), height)
+
+    self:ApplyListLayout()
+    self:UpdateDetailsTextWidth()
+    self:RefreshDetails()
 end
 
 function Mounts:RefreshDetails()
     if not self.detailsPanel then
         return
     end
+
+    self:UpdateDetailsTextWidth()
 
     if not self.selectedMount then
         self.detailsIcon:SetTexture(DEFAULT_MOUNT_ICON)
@@ -249,7 +455,7 @@ function Mounts:RefreshDetails()
 
     self.detailsIcon:SetTexture(journalInfo.icon or DEFAULT_MOUNT_ICON)
     self.detailsName:SetText(DisplayText(mount.name))
-    self.detailsStatus:SetText(journalInfo.collectedStatus)
+    self.detailsStatus:SetText("Status: " .. journalInfo.collectedStatus)
     self:SetStatusColor(self.detailsStatus, journalInfo.collectedStatus)
     self.detailsText:SetText(self:BuildDetailsText(mount, journalInfo))
 
@@ -272,7 +478,10 @@ function Mounts:Refresh()
         return
     end
 
-    local mounts = self:GetMounts()
+    local mounts = self:GetVisibleMounts()
+
+    self:RefreshStats(mounts)
+    self:ApplyListLayout()
 
     if self.emptyText then
         if #mounts == 0 then
@@ -292,15 +501,13 @@ function Mounts:Refresh()
         self.rows[index]:Hide()
     end
 
-    self.scrollChild:SetSize(LIST_WIDTH, math.max(#mounts * ROW_HEIGHT, ROW_HEIGHT))
+    self.scrollChild:SetSize(self.listInnerWidth or LIST_MIN_INNER_WIDTH, math.max(#mounts * ROW_HEIGHT, ROW_HEIGHT))
+    self:ApplyListLayout()
     self:RefreshDetails()
 end
 
 function Mounts:CreateDetailsPanel(parent)
     local panel = CreateFrame("Frame", nil, parent, "BackdropTemplate")
-    panel:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", 16, 16)
-    panel:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -16, 16)
-    panel:SetHeight(DETAILS_HEIGHT)
     panel:SetBackdrop({
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -313,30 +520,30 @@ function Mounts:CreateDetailsPanel(parent)
     panel:SetBackdropBorderColor(0.25, 0.25, 0.3, 1)
 
     local icon = panel:CreateTexture(nil, "ARTWORK")
-    icon:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -10)
+    icon:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -12)
     icon:SetSize(DETAIL_ICON_SIZE, DETAIL_ICON_SIZE)
 
     local name = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    name:SetPoint("TOPLEFT", icon, "TOPRIGHT", 10, 0)
-    name:SetPoint("RIGHT", panel, "RIGHT", -12, 0)
+    name:SetPoint("TOPLEFT", icon, "TOPRIGHT", 10, -2)
+    name:SetPoint("RIGHT", panel, "RIGHT", -14, 0)
     name:SetJustifyH("LEFT")
-    name:SetWordWrap(false)
+    name:SetWordWrap(true)
 
     local status = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    status:SetPoint("TOPLEFT", name, "BOTTOMLEFT", 0, -4)
+    status:SetPoint("TOPLEFT", name, "BOTTOMLEFT", 0, -6)
     status:SetJustifyH("LEFT")
 
     local scrollFrame = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", icon, "BOTTOMLEFT", 0, -8)
-    scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 8)
+    scrollFrame:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -78)
+    scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 12)
 
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetSize(LIST_WIDTH - 30, 1)
+    scrollChild:SetSize(DETAILS_MIN_WIDTH - 48, 1)
     scrollFrame:SetScrollChild(scrollChild)
 
     local detailText = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     detailText:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, 0)
-    detailText:SetWidth(LIST_WIDTH - 48)
+    detailText:SetWidth(DETAILS_MIN_WIDTH - 48)
     detailText:SetJustifyH("LEFT")
     detailText:SetJustifyV("TOP")
     detailText:SetWordWrap(true)
@@ -349,41 +556,104 @@ function Mounts:CreateDetailsPanel(parent)
     self.detailsText = detailText
 end
 
+function Mounts:CreateStatsArea(parent)
+    local statsFrame = CreateFrame("Frame", nil, parent)
+    statsFrame:SetPoint("TOPLEFT", parent, "TOPLEFT", OUTER_PADDING, -46)
+    statsFrame:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -OUTER_PADDING, -46)
+    statsFrame:SetHeight(36)
+
+    local statDefinitions = {
+        { key = "total", x = 0 },
+        { key = "collected", x = 120 },
+        { key = "missing", x = 270 },
+        { key = "completion", x = 410 },
+    }
+
+    self.statTexts = {}
+
+    for _, stat in ipairs(statDefinitions) do
+        local text = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        text:SetPoint("TOPLEFT", statsFrame, "TOPLEFT", stat.x, 0)
+        text:SetWidth(140)
+        text:SetJustifyH("LEFT")
+        text:SetWordWrap(false)
+        self.statTexts[stat.key] = text
+    end
+
+    return statsFrame
+end
+
 -- Creates the Mounts tab content.
 function Mounts:CreateContent(parent)
+    print("CollectionTracker: Mounts CreateContent")
     local title = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", 16, -16)
+    title:SetPoint("TOPLEFT", OUTER_PADDING, -16)
     title:SetText("Mounts")
 
-    local countText = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    countText:SetPoint("LEFT", title, "RIGHT", 12, 0)
-    countText:SetText(string.format("%d mounts", #self:GetMounts()))
+    local statsFrame = self:CreateStatsArea(parent)
 
-    self:CreateDetailsPanel(parent)
+    local bodyFrame = CreateFrame("Frame", nil, parent)
+    bodyFrame:SetPoint("TOPLEFT", statsFrame, "BOTTOMLEFT", 0, -10)
+    bodyFrame:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -OUTER_PADDING, OUTER_PADDING)
 
-    local header = CreateFrame("Frame", nil, parent)
-    header:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -16)
-    header:SetSize(LIST_WIDTH, 18)
+    local listPanel = CreateFrame("Frame", nil, bodyFrame, "BackdropTemplate")
+    listPanel:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true,
+        tileSize = 16,
+        edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    listPanel:SetBackdropColor(0.03, 0.03, 0.04, 0.25)
+    listPanel:SetBackdropBorderColor(0.18, 0.18, 0.22, 0.8)
+
+    local header = CreateFrame("Frame", nil, listPanel)
+    header:SetPoint("TOPLEFT", listPanel, "TOPLEFT", LIST_PANEL_PADDING, -LIST_PANEL_PADDING)
+    header:SetSize(LIST_MIN_INNER_WIDTH, 18)
     self:CreateHeader(header)
 
-    local scrollFrame = CreateFrame("ScrollFrame", nil, parent, "UIPanelScrollFrameTemplate")
+    local scrollFrame = CreateFrame("ScrollFrame", nil, listPanel, "UIPanelScrollFrameTemplate")
     scrollFrame:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 0, -6)
-    scrollFrame:SetPoint("BOTTOMRIGHT", self.detailsPanel, "TOPRIGHT", -14, 8)
+    scrollFrame:SetPoint("BOTTOMRIGHT", listPanel, "BOTTOMRIGHT", -SCROLLBAR_WIDTH, LIST_PANEL_PADDING)
 
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetSize(LIST_WIDTH, ROW_HEIGHT)
+    scrollChild:SetSize(LIST_MIN_INNER_WIDTH, ROW_HEIGHT)
     scrollFrame:SetScrollChild(scrollChild)
 
-    local emptyText = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local emptyText = listPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     emptyText:SetPoint("TOPLEFT", scrollFrame, "TOPLEFT", 0, -4)
     emptyText:SetText("No mount data loaded.")
     emptyText:Hide()
 
+    self:CreateDetailsPanel(bodyFrame)
+
     self.rows = {}
+    self.parent = parent
+    self.bodyFrame = bodyFrame
+    self.listPanel = listPanel
+    self.header = header
+    self.scrollFrame = scrollFrame
     self.scrollChild = scrollChild
     self.emptyText = emptyText
 
+    bodyFrame:SetScript("OnSizeChanged", function()
+        Mounts:LayoutPanels()
+    end)
+    parent:SetScript("OnShow", function()
+        Mounts:LayoutPanels()
+        Mounts:Refresh()
+
+        if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
+            C_Timer.After(0, function()
+                Mounts:LayoutPanels()
+                Mounts:Refresh()
+            end)
+        end
+    end)
+
+    self:LayoutPanels()
     self:Refresh()
 end
-
+print("CollectionTracker: Mounts.lua loaded")
 CollectionTracker:RegisterModule("mounts", Mounts)
