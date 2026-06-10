@@ -13,6 +13,7 @@ local LIST_MIN_WIDTH = 540
 local DETAILS_MIN_WIDTH = 280
 local LIST_PANEL_PADDING = 8
 local SCROLLBAR_WIDTH = 28
+local FILTER_CONTROLS_HEIGHT = 166
 
 local LIST_COLUMNS = {
     { key = "icon", title = "", minWidth = 26 },
@@ -36,6 +37,44 @@ local STATUS_COLORS = {
     Collected = { 0.25, 1, 0.25 },
     Missing = { 1, 0.25, 0.25 },
     Unknown = { 0.85, 0.75, 0.3 },
+}
+
+local STATUS_FILTERS = {
+    { key = "all", label = "All" },
+    { key = "collected", label = "Collected only" },
+    { key = "missing", label = "Missing only" },
+}
+
+local SOURCE_TYPE_OPTIONS = {
+    "Raid",
+    "Dungeon",
+    "World Boss",
+    "Rare",
+    "Achievement",
+    "Reputation",
+    "Vendor",
+    "Profession",
+    "Quest",
+    "Event",
+    "Trading Post",
+    "Other",
+}
+
+local SOURCE_TYPE_SORT_ORDER = {}
+for index, sourceType in ipairs(SOURCE_TYPE_OPTIONS) do
+    SOURCE_TYPE_SORT_ORDER[sourceType] = index
+end
+
+local SORT_OPTIONS = {
+    { key = "nameAsc", label = "Name A-Z" },
+    { key = "nameDesc", label = "Name Z-A" },
+    { key = "expansion", label = "Expansion" },
+    { key = "sourceType", label = "Source Type" },
+    { key = "dropAsc", label = "Drop Chance Low" },
+    { key = "dropDesc", label = "Drop Chance High" },
+    { key = "attemptsAsc", label = "Attempts Low" },
+    { key = "attemptsDesc", label = "Attempts High" },
+    { key = "status", label = "Collected/Missing" },
 }
 
 local function CreateCell(parent, fontObject, xOffset, width, justifyH)
@@ -72,6 +111,64 @@ end
 
 local function DetailLine(label, value)
     return string.format("%s: %s", label, DisplayText(value))
+end
+
+local function CompareText(left, right)
+    left = string.lower(DisplayText(left))
+    right = string.lower(DisplayText(right))
+
+    if left == right then
+        return nil
+    end
+
+    return left < right
+end
+
+local function CompareByNameThenID(left, right)
+    local comparison = CompareText(left and left.name, right and right.name)
+    if comparison ~= nil then
+        return comparison
+    end
+
+    return (tonumber(left and left.mountID) or 0) < (tonumber(right and right.mountID) or 0)
+end
+
+local function CreateFilterLabel(parent, text, x, y, width)
+    local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    label:SetWidth(width or 80)
+    label:SetJustifyH("LEFT")
+    label:SetWordWrap(false)
+    label:SetText(text)
+
+    return label
+end
+
+local function CreateFilterButton(parent, text, x, y, width, onClick)
+    local button = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    button:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    button:SetSize(width or 72, 22)
+    button:SetText(text)
+    button:SetScript("OnClick", onClick)
+
+    return button
+end
+
+local function CreateFilterCheckbox(parent, text, x, y, width, onClick)
+    local checkbox = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+    checkbox:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    checkbox:SetSize(18, 18)
+    checkbox:SetScript("OnClick", onClick)
+
+    local label = checkbox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    label:SetPoint("LEFT", checkbox, "RIGHT", 2, 0)
+    label:SetWidth(width or 100)
+    label:SetJustifyH("LEFT")
+    label:SetWordWrap(false)
+    label:SetText(text)
+    checkbox.label = label
+
+    return checkbox
 end
 
 function Mounts:GetMounts()
@@ -147,8 +244,246 @@ function Mounts:SetStatusColor(fontString, status)
     fontString:SetTextColor(color[1], color[2], color[3], 1)
 end
 
+function Mounts:GetSourceTypeOptions()
+    return SOURCE_TYPE_OPTIONS
+end
+
+function Mounts:GetExpansionOptions()
+    local expansionMap = {}
+    local expansions = {}
+
+    for _, mount in ipairs(self:GetMounts()) do
+        if mount.expansion and mount.expansion ~= "" and not expansionMap[mount.expansion] then
+            expansionMap[mount.expansion] = {
+                name = mount.expansion,
+                expansionOrder = tonumber(mount.expansionOrder) or 999,
+            }
+            table.insert(expansions, expansionMap[mount.expansion])
+        elseif mount.expansion and expansionMap[mount.expansion] then
+            local order = tonumber(mount.expansionOrder)
+            if order and order < expansionMap[mount.expansion].expansionOrder then
+                expansionMap[mount.expansion].expansionOrder = order
+            end
+        end
+    end
+
+    table.sort(expansions, function(left, right)
+        if left.expansionOrder == right.expansionOrder then
+            return left.name < right.name
+        end
+
+        return left.expansionOrder < right.expansionOrder
+    end)
+
+    return expansions
+end
+
+function Mounts:EnsureFilterState()
+    if type(self.filters) ~= "table" then
+        self.filters = {
+            status = "all",
+            sourceTypes = {},
+            expansions = {},
+        }
+    end
+
+    if type(self.filters.sourceTypes) ~= "table" then
+        self.filters.sourceTypes = {}
+    end
+
+    if type(self.filters.expansions) ~= "table" then
+        self.filters.expansions = {}
+    end
+
+    for _, sourceType in ipairs(self:GetSourceTypeOptions()) do
+        if self.filters.sourceTypes[sourceType] == nil then
+            self.filters.sourceTypes[sourceType] = true
+        end
+    end
+
+    for _, expansion in ipairs(self:GetExpansionOptions()) do
+        if self.filters.expansions[expansion.name] == nil then
+            self.filters.expansions[expansion.name] = true
+        end
+    end
+
+    self.sortKey = self.sortKey or SORT_OPTIONS[1].key
+end
+
+function Mounts:GetSortOption()
+    self:EnsureFilterState()
+
+    for index, option in ipairs(SORT_OPTIONS) do
+        if option.key == self.sortKey then
+            return option, index
+        end
+    end
+
+    self.sortKey = SORT_OPTIONS[1].key
+    return SORT_OPTIONS[1], 1
+end
+
+function Mounts:CycleSortOption()
+    local _, index = self:GetSortOption()
+    index = index + 1
+
+    if index > #SORT_OPTIONS then
+        index = 1
+    end
+
+    self.sortKey = SORT_OPTIONS[index].key
+    self:Refresh()
+end
+
+function Mounts:SetStatusFilter(status)
+    self:EnsureFilterState()
+    self.filters.status = status or "all"
+    self:Refresh()
+end
+
+function Mounts:SetSourceTypeFilter(sourceType, enabled)
+    self:EnsureFilterState()
+    self.filters.sourceTypes[sourceType] = enabled and true or false
+    self:Refresh()
+end
+
+function Mounts:SetExpansionFilter(expansion, enabled)
+    self:EnsureFilterState()
+    self.filters.expansions[expansion] = enabled and true or false
+    self:Refresh()
+end
+
+function Mounts:MountPassesFilters(mount)
+    self:EnsureFilterState()
+    mount = mount or {}
+
+    local status = self:GetJournalInfo(mount).collectedStatus
+    if self.filters.status == "collected" and status ~= "Collected" then
+        return false
+    end
+
+    if self.filters.status == "missing" and status ~= "Missing" then
+        return false
+    end
+
+    if mount.sourceType and self.filters.sourceTypes[mount.sourceType] == false then
+        return false
+    end
+
+    if mount.expansion and self.filters.expansions[mount.expansion] == false then
+        return false
+    end
+
+    return true
+end
+
+function Mounts:CompareByDropChance(left, right, descending)
+    local leftDrop = tonumber(left.dropChance)
+    local rightDrop = tonumber(right.dropChance)
+
+    if leftDrop and rightDrop then
+        if leftDrop == rightDrop then
+            return CompareByNameThenID(left, right)
+        end
+
+        if descending then
+            return leftDrop > rightDrop
+        end
+
+        return leftDrop < rightDrop
+    end
+
+    if leftDrop then
+        return true
+    end
+
+    if rightDrop then
+        return false
+    end
+
+    return CompareByNameThenID(left, right)
+end
+
+function Mounts:CompareMounts(left, right)
+    local sortKey = (self:GetSortOption()).key
+
+    if sortKey == "nameDesc" then
+        local comparison = CompareText(left.name, right.name)
+        if comparison ~= nil then
+            return not comparison
+        end
+    elseif sortKey == "expansion" then
+        local leftOrder = tonumber(left.expansionOrder) or 999
+        local rightOrder = tonumber(right.expansionOrder) or 999
+
+        if leftOrder ~= rightOrder then
+            return leftOrder < rightOrder
+        end
+    elseif sortKey == "sourceType" then
+        local leftOrder = SOURCE_TYPE_SORT_ORDER[left.sourceType] or 999
+        local rightOrder = SOURCE_TYPE_SORT_ORDER[right.sourceType] or 999
+
+        if leftOrder ~= rightOrder then
+            return leftOrder < rightOrder
+        end
+    elseif sortKey == "dropAsc" then
+        return self:CompareByDropChance(left, right, false)
+    elseif sortKey == "dropDesc" then
+        return self:CompareByDropChance(left, right, true)
+    elseif sortKey == "attemptsAsc" or sortKey == "attemptsDesc" then
+        local leftAttempts = self:GetTotalAttempts(left)
+        local rightAttempts = self:GetTotalAttempts(right)
+
+        if leftAttempts ~= rightAttempts then
+            if sortKey == "attemptsDesc" then
+                return leftAttempts > rightAttempts
+            end
+
+            return leftAttempts < rightAttempts
+        end
+    elseif sortKey == "status" then
+        local statusOrder = {
+            Collected = 1,
+            Missing = 2,
+            Unknown = 3,
+        }
+        local leftStatus = statusOrder[self:GetJournalInfo(left).collectedStatus] or 3
+        local rightStatus = statusOrder[self:GetJournalInfo(right).collectedStatus] or 3
+
+        if leftStatus ~= rightStatus then
+            return leftStatus < rightStatus
+        end
+    else
+        local comparison = CompareText(left.name, right.name)
+        if comparison ~= nil then
+            return comparison
+        end
+    end
+
+    local nameComparison = CompareText(left.name, right.name)
+    if nameComparison ~= nil then
+        return nameComparison
+    end
+
+    return CompareByNameThenID(left, right)
+end
+
 function Mounts:GetVisibleMounts()
-    return self:GetMounts()
+    self:EnsureFilterState()
+
+    local visibleMounts = {}
+
+    for _, mount in ipairs(self:GetMounts()) do
+        if self:MountPassesFilters(mount) then
+            table.insert(visibleMounts, mount)
+        end
+    end
+
+    table.sort(visibleMounts, function(left, right)
+        return Mounts:CompareMounts(left, right)
+    end)
+
+    return visibleMounts
 end
 
 function Mounts:CalculateColumnWidths(totalWidth)
@@ -359,15 +694,17 @@ function Mounts:RefreshStats(mounts)
 
     local total = #mounts
     local collected = 0
+    local missing = 0
 
     for _, mount in ipairs(mounts) do
         local journalInfo = self:GetJournalInfo(mount)
         if journalInfo.collectedStatus == "Collected" then
             collected = collected + 1
+        elseif journalInfo.collectedStatus == "Missing" then
+            missing = missing + 1
         end
     end
 
-    local missing = math.max(total - collected, 0)
     local completion = 0
 
     if total > 0 then
@@ -393,7 +730,6 @@ function Mounts:UpdateDetailsTextWidth()
 end
 
 function Mounts:LayoutPanels()
-    print("CollectionTracker: LayoutPanels")
     if not self.bodyFrame or not self.listPanel or not self.detailsPanel then
         return
     end
@@ -479,12 +815,26 @@ function Mounts:Refresh()
     end
 
     local mounts = self:GetVisibleMounts()
+    local selectedMountVisible = false
 
+    for _, mount in ipairs(mounts) do
+        if mount == self.selectedMount then
+            selectedMountVisible = true
+            break
+        end
+    end
+
+    if self.selectedMount and not selectedMountVisible then
+        self.selectedMount = nil
+    end
+
+    self:UpdateFilterControls()
     self:RefreshStats(mounts)
     self:ApplyListLayout()
 
     if self.emptyText then
         if #mounts == 0 then
+            self.emptyText:SetText("No mounts match current filters.")
             self.emptyText:Show()
         else
             self.emptyText:Hide()
@@ -583,9 +933,111 @@ function Mounts:CreateStatsArea(parent)
     return statsFrame
 end
 
+function Mounts:UpdateFilterControls()
+    self:EnsureFilterState()
+
+    if self.statusButtons then
+        for key, button in pairs(self.statusButtons) do
+            if key == self.filters.status then
+                button:SetButtonState("PUSHED", true)
+                button:LockHighlight()
+            else
+                button:SetButtonState("NORMAL", false)
+                button:UnlockHighlight()
+            end
+        end
+    end
+
+    if self.sourceTypeCheckboxes then
+        for sourceType, checkbox in pairs(self.sourceTypeCheckboxes) do
+            checkbox:SetChecked(self.filters.sourceTypes[sourceType] ~= false)
+        end
+    end
+
+    if self.expansionCheckboxes then
+        for expansion, checkbox in pairs(self.expansionCheckboxes) do
+            checkbox:SetChecked(self.filters.expansions[expansion] ~= false)
+        end
+    end
+
+    if self.sortButton then
+        local sortOption = self:GetSortOption()
+        self.sortButton:SetText("Sort: " .. sortOption.label)
+    end
+end
+
+function Mounts:CreateFilterControls(parent)
+    self:EnsureFilterState()
+
+    local expansions = self:GetExpansionOptions()
+    local expansionRows = math.max(1, math.ceil(#expansions / 4))
+    local controlsHeight = math.max(FILTER_CONTROLS_HEIGHT, 110 + (expansionRows * 20))
+
+    local controlsFrame = CreateFrame("Frame", nil, parent)
+    controlsFrame:SetPoint("TOPLEFT", parent, "TOPLEFT", LIST_PANEL_PADDING, -LIST_PANEL_PADDING)
+    controlsFrame:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -LIST_PANEL_PADDING, -LIST_PANEL_PADDING)
+    controlsFrame:SetHeight(controlsHeight)
+
+    self.statusButtons = {}
+    self.sourceTypeCheckboxes = {}
+    self.expansionCheckboxes = {}
+
+    CreateFilterLabel(controlsFrame, "Status", 0, 0, 46)
+
+    local statusX = 50
+    for _, status in ipairs(STATUS_FILTERS) do
+        local statusKey = status.key
+        local button = CreateFilterButton(controlsFrame, status.label, statusX, 2, statusKey == "all" and 42 or 92, function()
+            Mounts:SetStatusFilter(statusKey)
+        end)
+
+        self.statusButtons[statusKey] = button
+        statusX = statusX + (statusKey == "all" and 48 or 98)
+    end
+
+    local sortButton = CreateFilterButton(controlsFrame, "Sort: Name A-Z", 300, 2, 178, function()
+        Mounts:CycleSortOption()
+    end)
+    self.sortButton = sortButton
+
+    CreateFilterLabel(controlsFrame, "Source", 0, -28, 54)
+
+    local sourceColumnWidth = 116
+    local sourceStartX = 60
+    local sourceStartY = -26
+    for index, sourceType in ipairs(self:GetSourceTypeOptions()) do
+        local sourceTypeKey = sourceType
+        local column = (index - 1) % 4
+        local row = math.floor((index - 1) / 4)
+        local checkbox = CreateFilterCheckbox(controlsFrame, sourceTypeKey, sourceStartX + (column * sourceColumnWidth), sourceStartY - (row * 20), sourceColumnWidth - 24, function(button)
+            Mounts:SetSourceTypeFilter(sourceTypeKey, button:GetChecked())
+        end)
+
+        self.sourceTypeCheckboxes[sourceTypeKey] = checkbox
+    end
+
+    CreateFilterLabel(controlsFrame, "Expansion", 0, -88, 74)
+
+    local expansionColumnWidth = 128
+    local expansionStartY = -106
+    for index, expansion in ipairs(expansions) do
+        local expansionName = expansion.name
+        local column = (index - 1) % 4
+        local row = math.floor((index - 1) / 4)
+        local checkbox = CreateFilterCheckbox(controlsFrame, expansionName, column * expansionColumnWidth, expansionStartY - (row * 20), expansionColumnWidth - 24, function(button)
+            Mounts:SetExpansionFilter(expansionName, button:GetChecked())
+        end)
+
+        self.expansionCheckboxes[expansionName] = checkbox
+    end
+
+    self:UpdateFilterControls()
+
+    return controlsFrame
+end
+
 -- Creates the Mounts tab content.
 function Mounts:CreateContent(parent)
-    print("CollectionTracker: Mounts CreateContent")
     local title = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", OUTER_PADDING, -16)
     title:SetText("Mounts")
@@ -608,8 +1060,10 @@ function Mounts:CreateContent(parent)
     listPanel:SetBackdropColor(0.03, 0.03, 0.04, 0.25)
     listPanel:SetBackdropBorderColor(0.18, 0.18, 0.22, 0.8)
 
+    local controlsFrame = self:CreateFilterControls(listPanel)
+
     local header = CreateFrame("Frame", nil, listPanel)
-    header:SetPoint("TOPLEFT", listPanel, "TOPLEFT", LIST_PANEL_PADDING, -LIST_PANEL_PADDING)
+    header:SetPoint("TOPLEFT", controlsFrame, "BOTTOMLEFT", 0, -6)
     header:SetSize(LIST_MIN_INNER_WIDTH, 18)
     self:CreateHeader(header)
 
@@ -632,6 +1086,7 @@ function Mounts:CreateContent(parent)
     self.parent = parent
     self.bodyFrame = bodyFrame
     self.listPanel = listPanel
+    self.controlsFrame = controlsFrame
     self.header = header
     self.scrollFrame = scrollFrame
     self.scrollChild = scrollChild
@@ -655,5 +1110,5 @@ function Mounts:CreateContent(parent)
     self:LayoutPanels()
     self:Refresh()
 end
-print("CollectionTracker: Mounts.lua loaded")
+
 CollectionTracker:RegisterModule("mounts", Mounts)
