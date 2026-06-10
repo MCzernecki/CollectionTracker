@@ -3,6 +3,8 @@ local _, CollectionTracker = ...
 local Gold = {}
 
 local ROW_HEIGHT = 22
+local SUMMARY_VALUE_OFFSET = 180
+local SUMMARY_VALUE_WIDTH = 360
 local DETAIL_COLUMNS = {
     { key = "characterName", title = "Character", width = 120 },
     { key = "realmName", title = "Realm", width = 120 },
@@ -31,6 +33,9 @@ function Gold:EnsureDB()
     CollectionTracker.db = CollectionTracker.db or CollectionTrackerDB
     CollectionTracker.db.gold = CollectionTracker.db.gold or {}
     CollectionTracker.db.gold.characters = CollectionTracker.db.gold.characters or {}
+    if type(CollectionTracker.db.gold.warbandBank) ~= "table" then
+        CollectionTracker.db.gold.warbandBank = {}
+    end
 
     return CollectionTracker.db.gold
 end
@@ -41,6 +46,32 @@ end
 
 function Gold:FormatGold(copper)
     return GetCoinTextureString(copper or 0)
+end
+
+function Gold:GetWarbandBankType()
+    if type(Enum) ~= "table" or type(Enum.BankType) ~= "table" then
+        return nil
+    end
+
+    return Enum.BankType.Account
+end
+
+function Gold:FetchWarbandBankGold()
+    if type(C_Bank) ~= "table" or type(C_Bank.FetchDepositedMoney) ~= "function" then
+        return nil
+    end
+
+    local accountBankType = self:GetWarbandBankType()
+    if accountBankType == nil then
+        return nil
+    end
+
+    local success, depositedMoney = pcall(C_Bank.FetchDepositedMoney, accountBankType)
+    if not success then
+        return nil
+    end
+
+    return tonumber(depositedMoney)
 end
 
 function Gold:FormatLastUpdated(timestamp)
@@ -78,7 +109,7 @@ function Gold:GetSortedCharacters()
     return characters
 end
 
-function Gold:GetTotalGold()
+function Gold:GetCharactersTotalGold()
     local goldDB = self:EnsureDB()
     local totalGold = 0
 
@@ -91,10 +122,32 @@ function Gold:GetTotalGold()
     return totalGold
 end
 
+function Gold:GetWarbandBankGold()
+    local warbandBank = self:EnsureDB().warbandBank
+
+    if type(warbandBank) ~= "table" then
+        return 0
+    end
+
+    return tonumber(warbandBank.gold) or 0
+end
+
+function Gold:GetGrandTotalGold()
+    return self:GetCharactersTotalGold() + self:GetWarbandBankGold()
+end
+
 function Gold:Refresh()
-    if self.totalValue then
+    if self.charactersTotalValue then
         local prefix = self.detailsShown and "[-] " or "[+] "
-        self.totalValue:SetText(prefix .. self:FormatGold(self:GetTotalGold()))
+        self.charactersTotalValue:SetText(prefix .. self:FormatGold(self:GetCharactersTotalGold()))
+    end
+
+    if self.warbandBankValue then
+        self.warbandBankValue:SetText(self:FormatGold(self:GetWarbandBankGold()))
+    end
+
+    if self.grandTotalValue then
+        self.grandTotalValue:SetText(self:FormatGold(self:GetGrandTotalGold()))
     end
 
     if self.detailsShown then
@@ -114,6 +167,32 @@ function Gold:ToggleDetails()
     end
 
     self:Refresh()
+end
+
+function Gold:SaveWarbandBankGold()
+    local gold = self:FetchWarbandBankGold()
+
+    if gold == nil then
+        return false
+    end
+
+    local goldDB = self:EnsureDB()
+    goldDB.warbandBank.gold = gold
+    goldDB.warbandBank.lastUpdated = time()
+
+    self:Refresh()
+
+    return true
+end
+
+function Gold:UpdateWarbandBankGold()
+    self:SaveWarbandBankGold()
+
+    if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
+        C_Timer.After(0.5, function()
+            Gold:SaveWarbandBankGold()
+        end)
+    end
 end
 
 function Gold:SaveCurrentGold()
@@ -215,25 +294,49 @@ function Gold:CreateContent(parent)
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText("Gold")
 
-    local totalLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    totalLabel:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -16)
-    totalLabel:SetText("Total Gold")
+    local charactersTotalLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    charactersTotalLabel:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -18)
+    charactersTotalLabel:SetText("Characters Total Gold")
 
-    local totalButton = CreateFrame("Button", nil, parent)
-    totalButton:SetPoint("TOPLEFT", totalLabel, "BOTTOMLEFT", -4, -6)
-    totalButton:SetSize(300, 28)
-    totalButton:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
-    totalButton:SetScript("OnClick", function()
+    local charactersTotalButton = CreateFrame("Button", nil, parent)
+    charactersTotalButton:SetPoint("LEFT", charactersTotalLabel, "LEFT", SUMMARY_VALUE_OFFSET - 4, 0)
+    charactersTotalButton:SetSize(SUMMARY_VALUE_WIDTH, ROW_HEIGHT)
+    charactersTotalButton:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+    charactersTotalButton:SetScript("OnClick", function()
         Gold:ToggleDetails()
     end)
 
-    local totalValue = totalButton:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    totalValue:SetPoint("LEFT", totalButton, "LEFT", 4, 0)
-    totalValue:SetJustifyH("LEFT")
-    totalValue:SetText(self:FormatGold(0))
+    local charactersTotalValue = charactersTotalButton:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    charactersTotalValue:SetPoint("LEFT", charactersTotalButton, "LEFT", 4, 0)
+    charactersTotalValue:SetWidth(SUMMARY_VALUE_WIDTH)
+    charactersTotalValue:SetJustifyH("LEFT")
+    charactersTotalValue:SetWordWrap(false)
+    charactersTotalValue:SetText(self:FormatGold(0))
+
+    local warbandBankLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    warbandBankLabel:SetPoint("TOPLEFT", charactersTotalLabel, "BOTTOMLEFT", 0, -12)
+    warbandBankLabel:SetText("Warband Bank Gold")
+
+    local warbandBankValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    warbandBankValue:SetPoint("LEFT", warbandBankLabel, "LEFT", SUMMARY_VALUE_OFFSET, 0)
+    warbandBankValue:SetWidth(SUMMARY_VALUE_WIDTH)
+    warbandBankValue:SetJustifyH("LEFT")
+    warbandBankValue:SetWordWrap(false)
+    warbandBankValue:SetText(self:FormatGold(0))
+
+    local grandTotalLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    grandTotalLabel:SetPoint("TOPLEFT", warbandBankLabel, "BOTTOMLEFT", 0, -12)
+    grandTotalLabel:SetText("Grand Total Gold")
+
+    local grandTotalValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    grandTotalValue:SetPoint("LEFT", grandTotalLabel, "LEFT", SUMMARY_VALUE_OFFSET, 0)
+    grandTotalValue:SetWidth(SUMMARY_VALUE_WIDTH)
+    grandTotalValue:SetJustifyH("LEFT")
+    grandTotalValue:SetWordWrap(false)
+    grandTotalValue:SetText(self:FormatGold(0))
 
     local detailsPanel = CreateFrame("Frame", nil, parent)
-    detailsPanel:SetPoint("TOPLEFT", totalButton, "BOTTOMLEFT", 4, -18)
+    detailsPanel:SetPoint("TOPLEFT", grandTotalLabel, "BOTTOMLEFT", 0, -20)
     detailsPanel:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -16, 16)
     detailsPanel:Hide()
 
@@ -251,7 +354,10 @@ function Gold:CreateContent(parent)
     emptyText:SetPoint("TOPLEFT", scrollFrame, "TOPLEFT", 0, -4)
     emptyText:SetText("No character gold saved yet.")
 
-    self.totalValue = totalValue
+    self.charactersTotalValue = charactersTotalValue
+    self.totalValue = charactersTotalValue
+    self.warbandBankValue = warbandBankValue
+    self.grandTotalValue = grandTotalValue
     self.detailsPanel = detailsPanel
     self.detailsScrollChild = scrollChild
     self.detailRows = {}
@@ -260,10 +366,22 @@ function Gold:CreateContent(parent)
 end
 
 local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("PLAYER_LOGIN")
-eventFrame:RegisterEvent("PLAYER_MONEY")
-eventFrame:SetScript("OnEvent", function()
-    Gold:SaveCurrentGold()
+local function RegisterEventSafely(eventName)
+    pcall(eventFrame.RegisterEvent, eventFrame, eventName)
+end
+
+RegisterEventSafely("PLAYER_LOGIN")
+RegisterEventSafely("PLAYER_MONEY")
+RegisterEventSafely("BANKFRAME_OPENED")
+RegisterEventSafely("ACCOUNT_BANK_PANEL_OPENED")
+RegisterEventSafely("ACCOUNT_BANK_OPENED")
+
+eventFrame:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_LOGIN" or event == "PLAYER_MONEY" then
+        Gold:SaveCurrentGold()
+    else
+        Gold:UpdateWarbandBankGold()
+    end
 end)
 
 CollectionTracker:RegisterModule("gold", Gold)
