@@ -24,6 +24,7 @@ local LIST_COLUMNS = {
     { key = "dropChance", title = "Drop", minWidth = 42, justifyH = "RIGHT" },
     { key = "collected", title = "Status", minWidth = 58 },
     { key = "attempts", title = "Attempts", minWidth = 50, justifyH = "RIGHT" },
+    { key = "attemptButton", title = "", minWidth = 54 },
 }
 
 local LIST_MIN_INNER_WIDTH = 0
@@ -220,23 +221,113 @@ function Mounts:GetJournalInfo(mount)
     }
 end
 
+function Mounts:GetCharacterKey()
+    local characterName = UnitName("player") or "Unknown"
+    local realmName = GetRealmName() or "Unknown"
+
+    return string.format("%s-%s", realmName, characterName)
+end
+
+function Mounts:EnsureAttemptDB()
+    CollectionTrackerDB = CollectionTrackerDB or {}
+    CollectionTracker.db = CollectionTracker.db or CollectionTrackerDB
+
+    if type(CollectionTracker.db.mountAttempts) ~= "table" then
+        CollectionTracker.db.mountAttempts = {}
+    end
+
+    return CollectionTracker.db.mountAttempts
+end
+
+function Mounts:GetAttemptRecord(mount)
+    if type(mount) ~= "table" or not mount.mountID then
+        return nil
+    end
+
+    local mountAttempts = self:EnsureAttemptDB()
+    local mountID = mount.mountID
+    local record = mountAttempts[mountID]
+
+    if type(record) == "number" then
+        record = {
+            totalAttempts = record,
+            attemptsByCharacter = {},
+            lastAttemptDate = nil,
+            lastAttemptCharacter = nil,
+        }
+        mountAttempts[mountID] = record
+    elseif type(record) ~= "table" then
+        record = {
+            totalAttempts = 0,
+            attemptsByCharacter = {},
+            lastAttemptDate = nil,
+            lastAttemptCharacter = nil,
+        }
+        mountAttempts[mountID] = record
+    end
+
+    if type(record.attemptsByCharacter) ~= "table" then
+        if type(record.characters) == "table" then
+            record.attemptsByCharacter = record.characters
+            record.characters = nil
+        else
+            record.attemptsByCharacter = {}
+        end
+    end
+
+    record.totalAttempts = tonumber(record.totalAttempts) or 0
+
+    return record
+end
+
 function Mounts:GetTotalAttempts(mount)
     if type(mount) ~= "table" then
         return 0
     end
 
-    if type(mount.totalAttempts) == "number" then
-        return mount.totalAttempts
-    end
-
     local db = CollectionTracker.db or CollectionTrackerDB
     local mountAttempts = db and db.mountAttempts
 
-    if type(mountAttempts) == "table" and mount.mountID and type(mountAttempts[mount.mountID]) == "number" then
-        return mountAttempts[mount.mountID]
+    if type(mountAttempts) == "table" and mount.mountID then
+        local record = mountAttempts[mount.mountID]
+
+        if type(record) == "number" then
+            return record
+        end
+
+        if type(record) == "table" then
+            return tonumber(record.totalAttempts) or 0
+        end
     end
 
-    return 0
+    return tonumber(mount.totalAttempts) or 0
+end
+
+function Mounts:AddAttempt(mount)
+    if type(mount) ~= "table" or not mount.mountID then
+        return
+    end
+
+    local journalInfo = self:GetJournalInfo(mount)
+    if journalInfo.collectedStatus == "Collected" then
+        print(string.format("|cff33ff99CollectionTracker:|r %s is already collected. Attempt not added.", DisplayText(mount.name)))
+        return
+    end
+
+    local characterKey = self:GetCharacterKey()
+    local record = self:GetAttemptRecord(mount)
+
+    if not record then
+        return
+    end
+
+    record.totalAttempts = (tonumber(record.totalAttempts) or 0) + 1
+    record.attemptsByCharacter[characterKey] = (tonumber(record.attemptsByCharacter[characterKey]) or 0) + 1
+    record.lastAttemptDate = time()
+    record.lastAttemptCharacter = characterKey
+
+    self.selectedMount = mount
+    self:Refresh()
 end
 
 function Mounts:SetStatusColor(fontString, status)
@@ -525,6 +616,9 @@ function Mounts:LayoutCells(frame, widths, isRow)
             if isRow and column.key == "icon" then
                 cell:SetPoint("LEFT", frame, "LEFT", xOffset + 3, 0)
                 cell:SetSize(math.min(ICON_SIZE, math.max(width - 6, 12)), ICON_SIZE)
+            elseif isRow and column.key == "attemptButton" then
+                cell:SetPoint("LEFT", frame, "LEFT", xOffset + 4, 0)
+                cell:SetSize(math.max(width - 8, 22), 20)
             else
                 cell:SetPoint("LEFT", frame, "LEFT", xOffset, 0)
                 cell:SetWidth(width)
@@ -599,7 +693,20 @@ function Mounts:CreateRow(index)
     local xOffset = LIST_COLUMNS[1].minWidth
     for index = 2, #LIST_COLUMNS do
         local column = LIST_COLUMNS[index]
-        row.cells[column.key] = CreateCell(row, "GameFontHighlightSmall", xOffset, column.minWidth, column.justifyH)
+
+        if column.key == "attemptButton" then
+            local button = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            button:SetPoint("LEFT", row, "LEFT", xOffset + 4, 0)
+            button:SetSize(math.max(column.minWidth - 8, 22), 20)
+            button:SetText("+")
+            button:SetScript("OnClick", function()
+                Mounts:AddAttempt(row.mount)
+            end)
+            row.cells[column.key] = button
+        else
+            row.cells[column.key] = CreateCell(row, "GameFontHighlightSmall", xOffset, column.minWidth, column.justifyH)
+        end
+
         xOffset = xOffset + column.minWidth
     end
 
@@ -644,8 +751,12 @@ function Mounts:PopulateRow(row, mount)
 
     if journalInfo.collectedStatus == "Collected" then
         row:SetAlpha(0.72)
+        row.cells.attemptButton:SetText("-")
+        row.cells.attemptButton:Disable()
     else
         row:SetAlpha(1)
+        row.cells.attemptButton:SetText("+")
+        row.cells.attemptButton:Enable()
     end
 
     self:SetRowSelected(row, self.selectedMount == mount)
