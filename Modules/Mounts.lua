@@ -14,6 +14,7 @@ local DETAILS_MIN_WIDTH = 280
 local LIST_PANEL_PADDING = 8
 local SCROLLBAR_WIDTH = 28
 local FILTER_CONTROLS_HEIGHT = 166
+local COLLECTION_CHECK_DELAY = 2
 
 local LIST_COLUMNS = {
     { key = "icon", title = "", minWidth = 26 },
@@ -24,7 +25,6 @@ local LIST_COLUMNS = {
     { key = "dropChance", title = "Drop", minWidth = 42, justifyH = "RIGHT" },
     { key = "collected", title = "Status", minWidth = 58 },
     { key = "attempts", title = "Attempts", minWidth = 50, justifyH = "RIGHT" },
-    { key = "attemptButton", title = "", minWidth = 54 },
 }
 
 local LIST_MIN_INNER_WIDTH = 0
@@ -254,6 +254,10 @@ function Mounts:GetAttemptRecord(mount)
             attemptsByCharacter = {},
             lastAttemptDate = nil,
             lastAttemptCharacter = nil,
+            collected = false,
+            collectedDate = nil,
+            collectedCharacter = nil,
+            collectedAtAttempt = nil,
         }
         mountAttempts[mountID] = record
     elseif type(record) ~= "table" then
@@ -262,6 +266,10 @@ function Mounts:GetAttemptRecord(mount)
             attemptsByCharacter = {},
             lastAttemptDate = nil,
             lastAttemptCharacter = nil,
+            collected = false,
+            collectedDate = nil,
+            collectedCharacter = nil,
+            collectedAtAttempt = nil,
         }
         mountAttempts[mountID] = record
     end
@@ -303,31 +311,182 @@ function Mounts:GetTotalAttempts(mount)
     return tonumber(mount.totalAttempts) or 0
 end
 
-function Mounts:AddAttempt(mount)
+function Mounts:GetMountsByEncounterID(encounterID)
+    local normalizedEncounterID = tonumber(encounterID)
+    local matches = {}
+
+    if not normalizedEncounterID then
+        return matches
+    end
+
+    for _, mount in ipairs(self:GetMounts()) do
+        if tonumber(mount.encounterID) == normalizedEncounterID then
+            table.insert(matches, mount)
+        end
+    end
+
+    return matches
+end
+
+function Mounts:GetMountByID(mountID)
+    local normalizedMountID = tonumber(mountID)
+
+    if not normalizedMountID then
+        return nil
+    end
+
+    for _, mount in ipairs(self:GetMounts()) do
+        if tonumber(mount.mountID) == normalizedMountID then
+            return mount
+        end
+    end
+
+    return nil
+end
+
+function Mounts:AddAttempt(mount, options)
+    options = options or {}
+
     if type(mount) ~= "table" or not mount.mountID then
-        return
+        return false, 0, "invalid mount"
     end
 
     local journalInfo = self:GetJournalInfo(mount)
-    if journalInfo.collectedStatus == "Collected" then
-        print(string.format("|cff33ff99CollectionTracker:|r %s is already collected. Attempt not added.", DisplayText(mount.name)))
-        return
-    end
-
-    local characterKey = self:GetCharacterKey()
     local record = self:GetAttemptRecord(mount)
 
     if not record then
-        return
+        return false, self:GetTotalAttempts(mount), "attempt record unavailable"
     end
+
+    if record.collected == true or journalInfo.collectedStatus == "Collected" then
+        if not options.suppressSkipMessage then
+            print(string.format("|cff33ff99CollectionTracker:|r %s is already collected. Attempt not added.", DisplayText(mount.name)))
+        end
+
+        return false, record.totalAttempts, "already collected"
+    end
+
+    local characterKey = self:GetCharacterKey()
 
     record.totalAttempts = (tonumber(record.totalAttempts) or 0) + 1
     record.attemptsByCharacter[characterKey] = (tonumber(record.attemptsByCharacter[characterKey]) or 0) + 1
     record.lastAttemptDate = time()
     record.lastAttemptCharacter = characterKey
 
-    self.selectedMount = mount
+    if options.selectMount ~= false then
+        self.selectedMount = mount
+    end
+
     self:Refresh()
+
+    return true, record.totalAttempts
+end
+
+function Mounts:MarkMountCollected(mount, collectedAtAttempt)
+    local record = self:GetAttemptRecord(mount)
+
+    if not record or record.collected == true then
+        return false
+    end
+
+    local journalInfo = self:GetJournalInfo(mount)
+    if journalInfo.collectedStatus ~= "Collected" then
+        return false
+    end
+
+    record.collected = true
+    record.collectedDate = time()
+    record.collectedCharacter = self:GetCharacterKey()
+    record.collectedAtAttempt = tonumber(collectedAtAttempt) or tonumber(record.totalAttempts) or 0
+
+    self:Refresh()
+
+    print("[CollectionTracker]")
+    print("Congratulations!")
+    print(string.format("%s collected after %d attempts.", DisplayText(mount.name), record.collectedAtAttempt))
+
+    return true
+end
+
+function Mounts:ScheduleCollectionCheck(mount, collectedAtAttempt)
+    if type(C_Timer) ~= "table" or type(C_Timer.After) ~= "function" then
+        print(string.format("[CollectionTracker] Debug: collection check skipped for %s (timer API unavailable).", DisplayText(mount and mount.name)))
+        return
+    end
+
+    local mountID = mount and mount.mountID
+
+    C_Timer.After(COLLECTION_CHECK_DELAY, function()
+        local currentMount = Mounts:GetMountByID(mountID)
+
+        if currentMount then
+            Mounts:MarkMountCollected(currentMount, collectedAtAttempt)
+        end
+    end)
+end
+
+function Mounts:HandleEncounterEnd(encounterID, success)
+    print(string.format("[CollectionTracker] Debug: encounterID: %s", tostring(encounterID)))
+
+    if success ~= 1 and success ~= true then
+        print(string.format("[CollectionTracker] Debug: attempt skipped for encounterID %s (encounter was not successful).", tostring(encounterID)))
+        return
+    end
+
+    local matchingMounts = self:GetMountsByEncounterID(encounterID)
+
+    if #matchingMounts == 0 then
+        print(string.format("[CollectionTracker] Debug: attempt skipped for encounterID %s (no matching mount).", tostring(encounterID)))
+        return
+    end
+
+    for _, mount in ipairs(matchingMounts) do
+        local mountName = DisplayText(mount.name)
+        print(string.format("[CollectionTracker] Debug: matched mount: %s", mountName))
+
+        local added, totalAttempts, skipReason = self:AddAttempt(mount, {
+            selectMount = false,
+            suppressSkipMessage = true,
+        })
+
+        if added then
+            print("[CollectionTracker]")
+            print(string.format("Attempt added for %s.", mountName))
+            print(string.format("Total attempts: %d", totalAttempts))
+            self:ScheduleCollectionCheck(mount, totalAttempts)
+        else
+            print(string.format("[CollectionTracker] Debug: attempt skipped for %s (%s).", mountName, skipReason or "unknown reason"))
+        end
+    end
+end
+
+function Mounts:HandleAddAttemptCommand(arguments)
+    local mountID = tonumber(string.match(arguments or "", "^%s*(%d+)%s*$"))
+
+    if not mountID then
+        print("[CollectionTracker] Usage: /ct addattempt <mountID>")
+        return
+    end
+
+    local mount = self:GetMountByID(mountID)
+
+    if not mount then
+        print(string.format("[CollectionTracker] No mount found with mountID %d.", mountID))
+        return
+    end
+
+    local mountName = DisplayText(mount.name)
+    local added, totalAttempts, skipReason = self:AddAttempt(mount, {
+        selectMount = false,
+        suppressSkipMessage = true,
+    })
+
+    if added then
+        print(string.format("[CollectionTracker] Test attempt added for %s.", mountName))
+        print(string.format("Total attempts: %d", totalAttempts))
+    else
+        print(string.format("[CollectionTracker] Test attempt skipped for %s (%s).", mountName, skipReason or "unknown reason"))
+    end
 end
 
 function Mounts:SetStatusColor(fontString, status)
@@ -616,9 +775,6 @@ function Mounts:LayoutCells(frame, widths, isRow)
             if isRow and column.key == "icon" then
                 cell:SetPoint("LEFT", frame, "LEFT", xOffset + 3, 0)
                 cell:SetSize(math.min(ICON_SIZE, math.max(width - 6, 12)), ICON_SIZE)
-            elseif isRow and column.key == "attemptButton" then
-                cell:SetPoint("LEFT", frame, "LEFT", xOffset + 4, 0)
-                cell:SetSize(math.max(width - 8, 22), 20)
             else
                 cell:SetPoint("LEFT", frame, "LEFT", xOffset, 0)
                 cell:SetWidth(width)
@@ -693,19 +849,7 @@ function Mounts:CreateRow(index)
     local xOffset = LIST_COLUMNS[1].minWidth
     for index = 2, #LIST_COLUMNS do
         local column = LIST_COLUMNS[index]
-
-        if column.key == "attemptButton" then
-            local button = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-            button:SetPoint("LEFT", row, "LEFT", xOffset + 4, 0)
-            button:SetSize(math.max(column.minWidth - 8, 22), 20)
-            button:SetText("+")
-            button:SetScript("OnClick", function()
-                Mounts:AddAttempt(row.mount)
-            end)
-            row.cells[column.key] = button
-        else
-            row.cells[column.key] = CreateCell(row, "GameFontHighlightSmall", xOffset, column.minWidth, column.justifyH)
-        end
+        row.cells[column.key] = CreateCell(row, "GameFontHighlightSmall", xOffset, column.minWidth, column.justifyH)
 
         xOffset = xOffset + column.minWidth
     end
@@ -751,12 +895,8 @@ function Mounts:PopulateRow(row, mount)
 
     if journalInfo.collectedStatus == "Collected" then
         row:SetAlpha(0.72)
-        row.cells.attemptButton:SetText("-")
-        row.cells.attemptButton:Disable()
     else
         row:SetAlpha(1)
-        row.cells.attemptButton:SetText("+")
-        row.cells.attemptButton:Enable()
     end
 
     self:SetRowSelected(row, self.selectedMount == mount)
@@ -1221,5 +1361,13 @@ function Mounts:CreateContent(parent)
     self:LayoutPanels()
     self:Refresh()
 end
+
+local encounterEventFrame = CreateFrame("Frame")
+encounterEventFrame:RegisterEvent("ENCOUNTER_END")
+encounterEventFrame:SetScript("OnEvent", function(_, event, encounterID, encounterName, difficultyID, groupSize, success)
+    if event == "ENCOUNTER_END" then
+        Mounts:HandleEncounterEnd(encounterID, success)
+    end
+end)
 
 CollectionTracker:RegisterModule("mounts", Mounts)

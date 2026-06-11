@@ -67,7 +67,21 @@ function CollectionTracker:ToggleMainWindow()
 end
 
 SLASH_COLLECTIONTRACKER1 = "/ct"
-SlashCmdList.COLLECTIONTRACKER = function()
+SlashCmdList.COLLECTIONTRACKER = function(message)
+    local command, arguments = string.match(message or "", "^%s*(%S*)%s*(.-)%s*$")
+
+    if string.lower(command or "") == "addattempt" then
+        local mountsModule = CollectionTracker.modules.mounts
+
+        if mountsModule and mountsModule.HandleAddAttemptCommand then
+            mountsModule:HandleAddAttemptCommand(arguments)
+        else
+            print("[CollectionTracker] Mount attempt tracking is not available.")
+        end
+
+        return
+    end
+
     CollectionTracker:ToggleMainWindow()
 end
 
