@@ -13,11 +13,12 @@ local LIST_MIN_WIDTH = 540
 local DETAILS_MIN_WIDTH = 280
 local LIST_PANEL_PADDING = 8
 local SCROLLBAR_WIDTH = 28
-local FILTER_CONTROLS_HEIGHT = 166
+local FILTER_CONTROLS_HEIGHT = 196
 local COLLECTION_CHECK_DELAY = 2
 
 local LIST_COLUMNS = {
     { key = "icon", title = "", minWidth = 26 },
+    { key = "favorite", title = "\226\152\133", minWidth = 24, justifyH = "CENTER" },
     { key = "name", title = "Name", minWidth = 100, flex = 2 },
     { key = "expansion", title = "Expansion", minWidth = 66, flex = 1 },
     { key = "sourceType", title = "Type", minWidth = 54, flex = 1 },
@@ -114,6 +115,16 @@ local function DetailLine(label, value)
     return string.format("%s: %s", label, DisplayText(value))
 end
 
+local function FormatTrackingDate(timestamp)
+    timestamp = tonumber(timestamp)
+
+    if not timestamp or timestamp <= 0 then
+        return "-"
+    end
+
+    return date("%Y-%m-%d %H:%M", timestamp)
+end
+
 local function CompareText(left, right)
     left = string.lower(DisplayText(left))
     right = string.lower(DisplayText(right))
@@ -180,6 +191,44 @@ function Mounts:GetMounts()
     end
 
     return mountData.mounts
+end
+
+function Mounts:EnsureFavoritesDB()
+    CollectionTrackerDB = CollectionTrackerDB or {}
+    CollectionTracker.db = CollectionTracker.db or CollectionTrackerDB
+
+    if type(CollectionTracker.db.mountFavorites) ~= "table" then
+        CollectionTracker.db.mountFavorites = {}
+    end
+
+    return CollectionTracker.db.mountFavorites
+end
+
+function Mounts:IsFavorite(mount)
+    if type(mount) ~= "table" or not mount.mountID then
+        return false
+    end
+
+    local db = CollectionTracker.db or CollectionTrackerDB
+    local favorites = db and db.mountFavorites
+
+    return type(favorites) == "table" and favorites[mount.mountID] == true
+end
+
+function Mounts:ToggleFavorite(mount)
+    if type(mount) ~= "table" or not mount.mountID then
+        return
+    end
+
+    local favorites = self:EnsureFavoritesDB()
+
+    if self:IsFavorite(mount) then
+        favorites[mount.mountID] = nil
+    else
+        favorites[mount.mountID] = true
+    end
+
+    self:Refresh()
 end
 
 function Mounts:GetJournalInfo(mount)
@@ -309,6 +358,116 @@ function Mounts:GetTotalAttempts(mount)
     end
 
     return tonumber(mount.totalAttempts) or 0
+end
+
+function Mounts:GetSavedAttemptRecord(mount)
+    if type(mount) ~= "table" or not mount.mountID then
+        return nil
+    end
+
+    local db = CollectionTracker.db or CollectionTrackerDB
+    local mountAttempts = db and db.mountAttempts
+
+    if type(mountAttempts) ~= "table" then
+        return nil
+    end
+
+    return mountAttempts[mount.mountID]
+end
+
+function Mounts:GetSortedCharacterAttempts(record)
+    local attemptsByCharacter = type(record) == "table" and (record.attemptsByCharacter or record.characters)
+    local attempts = {}
+
+    if type(attemptsByCharacter) ~= "table" then
+        return attempts
+    end
+
+    for characterKey, count in pairs(attemptsByCharacter) do
+        count = tonumber(count) or 0
+
+        if count > 0 then
+            table.insert(attempts, {
+                characterKey = tostring(characterKey),
+                attempts = count,
+            })
+        end
+    end
+
+    table.sort(attempts, function(left, right)
+        if left.attempts ~= right.attempts then
+            return left.attempts > right.attempts
+        end
+
+        return left.characterKey < right.characterKey
+    end)
+
+    return attempts
+end
+
+function Mounts:HasSavedTrackingData(record)
+    if type(record) == "number" then
+        return record > 0
+    end
+
+    if type(record) ~= "table" then
+        return false
+    end
+
+    if (tonumber(record.totalAttempts) or 0) > 0 or record.lastAttemptDate or record.lastAttemptCharacter or record.collected == true then
+        return true
+    end
+
+    return #self:GetSortedCharacterAttempts(record) > 0
+end
+
+function Mounts:AppendTrackingDetails(details, mount, journalInfo)
+    local record = self:GetSavedAttemptRecord(mount)
+    local recordTable = type(record) == "table" and record or {}
+    local hasTrackingData = self:HasSavedTrackingData(record)
+    local totalAttempts = type(record) == "number" and record or tonumber(recordTable.totalAttempts) or 0
+    local attemptsByCharacter = self:GetSortedCharacterAttempts(record)
+    local currentCharacter = self:GetCharacterKey()
+    local currentCharacterAttempts = 0
+
+    for _, characterAttempts in ipairs(attemptsByCharacter) do
+        if characterAttempts.characterKey == currentCharacter then
+            currentCharacterAttempts = characterAttempts.attempts
+            break
+        end
+    end
+
+    table.insert(details, "|cffffd100Tracking|r")
+
+    if not hasTrackingData then
+        table.insert(details, "No attempts tracked yet.")
+    else
+        table.insert(details, DetailLine("Total Attempts", totalAttempts))
+        table.insert(details, DetailLine("Current Character Attempts", currentCharacterAttempts))
+
+        if #attemptsByCharacter > 0 then
+            table.insert(details, "Attempts per Character:")
+
+            for _, characterAttempts in ipairs(attemptsByCharacter) do
+                table.insert(details, string.format("  %s: %d", characterAttempts.characterKey, characterAttempts.attempts))
+            end
+        else
+            table.insert(details, "Attempts per Character: -")
+        end
+
+        table.insert(details, DetailLine("Last Attempt Date", FormatTrackingDate(recordTable.lastAttemptDate)))
+        table.insert(details, DetailLine("Last Attempt Character", recordTable.lastAttemptCharacter))
+    end
+
+    local hasSavedCollection = recordTable.collected == true
+    table.insert(details, DetailLine("Collected Saved Status", hasSavedCollection and "Yes" or "No"))
+    table.insert(details, DetailLine("Collected Date", FormatTrackingDate(recordTable.collectedDate)))
+    table.insert(details, DetailLine("Collected Character", recordTable.collectedCharacter))
+    table.insert(details, DetailLine("Collected At Attempt", recordTable.collectedAtAttempt))
+
+    if not hasSavedCollection and journalInfo.collectedStatus == "Collected" then
+        table.insert(details, "Collected before tracking started.")
+    end
 end
 
 function Mounts:GetMountsByEncounterID(encounterID)
@@ -534,6 +693,8 @@ function Mounts:EnsureFilterState()
             status = "all",
             sourceTypes = {},
             expansions = {},
+            search = "",
+            favoritesOnly = false,
         }
     end
 
@@ -543,6 +704,18 @@ function Mounts:EnsureFilterState()
 
     if type(self.filters.expansions) ~= "table" then
         self.filters.expansions = {}
+    end
+
+    if type(self.filters.search) ~= "string" then
+        self.filters.search = ""
+    end
+
+    if type(self.filters.favoritesOnly) ~= "boolean" then
+        self.filters.favoritesOnly = false
+    end
+
+    if self.viewMode ~= "farming" then
+        self.viewMode = "mounts"
     end
 
     for _, sourceType in ipairs(self:GetSourceTypeOptions()) do
@@ -603,17 +776,75 @@ function Mounts:SetExpansionFilter(expansion, enabled)
     self:Refresh()
 end
 
+function Mounts:SetSearchText(searchText)
+    self:EnsureFilterState()
+    self.filters.search = tostring(searchText or "")
+    self:Refresh()
+end
+
+function Mounts:SetFavoritesOnly(enabled)
+    self:EnsureFilterState()
+    self.filters.favoritesOnly = enabled and true or false
+    self:Refresh()
+end
+
+function Mounts:ToggleViewMode()
+    if self.viewMode == "farming" then
+        self.viewMode = "mounts"
+    else
+        self.viewMode = "farming"
+    end
+
+    self:Refresh()
+end
+
+function Mounts:MountMatchesSearch(mount)
+    local searchText = string.match(self.filters.search or "", "^%s*(.-)%s*$")
+
+    if searchText == "" then
+        return true
+    end
+
+    searchText = string.lower(searchText)
+
+    local searchableFields = {
+        mount.name or "",
+        mount.sourceName or "",
+        mount.bossName or "",
+        mount.expansion or "",
+    }
+
+    for _, value in ipairs(searchableFields) do
+        if string.find(string.lower(tostring(value)), searchText, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
 function Mounts:MountPassesFilters(mount)
     self:EnsureFilterState()
     mount = mount or {}
 
     local status = self:GetJournalInfo(mount).collectedStatus
-    if self.filters.status == "collected" and status ~= "Collected" then
-        return false
-    end
 
-    if self.filters.status == "missing" and status ~= "Missing" then
-        return false
+    if self.viewMode == "farming" then
+        if status ~= "Missing" or not self:IsFavorite(mount) then
+            return false
+        end
+    else
+        if self.filters.status == "collected" and status ~= "Collected" then
+            return false
+        end
+
+        if self.filters.status == "missing" and status ~= "Missing" then
+            return false
+        end
+
+        if self.filters.favoritesOnly and not self:IsFavorite(mount) then
+            return false
+        end
     end
 
     if mount.sourceType and self.filters.sourceTypes[mount.sourceType] == false then
@@ -621,6 +852,10 @@ function Mounts:MountPassesFilters(mount)
     end
 
     if mount.expansion and self.filters.expansions[mount.expansion] == false then
+        return false
+    end
+
+    if not self:MountMatchesSearch(mount) then
         return false
     end
 
@@ -775,6 +1010,9 @@ function Mounts:LayoutCells(frame, widths, isRow)
             if isRow and column.key == "icon" then
                 cell:SetPoint("LEFT", frame, "LEFT", xOffset + 3, 0)
                 cell:SetSize(math.min(ICON_SIZE, math.max(width - 6, 12)), ICON_SIZE)
+            elseif isRow and column.key == "favorite" then
+                cell:SetPoint("LEFT", frame, "LEFT", xOffset, 0)
+                cell:SetSize(width, ROW_HEIGHT)
             else
                 cell:SetPoint("LEFT", frame, "LEFT", xOffset, 0)
                 cell:SetWidth(width)
@@ -822,6 +1060,23 @@ function Mounts:CreateHeader(parent)
         parent.cells[column.key]:SetText(column.title)
         xOffset = xOffset + column.minWidth
     end
+
+    self:UpdateHeaderLabels()
+end
+
+function Mounts:UpdateHeaderLabels()
+    if not self.header or not self.header.cells then
+        return
+    end
+
+    for _, column in ipairs(LIST_COLUMNS) do
+        self.header.cells[column.key]:SetText(column.title)
+    end
+
+    if self.viewMode == "farming" then
+        self.header.cells.expansion:SetText("Boss")
+        self.header.cells.collected:SetText("")
+    end
 end
 
 function Mounts:CreateRow(index)
@@ -849,7 +1104,37 @@ function Mounts:CreateRow(index)
     local xOffset = LIST_COLUMNS[1].minWidth
     for index = 2, #LIST_COLUMNS do
         local column = LIST_COLUMNS[index]
-        row.cells[column.key] = CreateCell(row, "GameFontHighlightSmall", xOffset, column.minWidth, column.justifyH)
+
+        if column.key == "favorite" then
+            local button = CreateFrame("Button", nil, row)
+            button:SetPoint("LEFT", row, "LEFT", xOffset, 0)
+            button:SetSize(column.minWidth, ROW_HEIGHT)
+
+            local star = button:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+            star:SetPoint("CENTER", button, "CENTER", 0, 0)
+            star:SetText("\226\152\133")
+            button.star = star
+
+            button:SetScript("OnClick", function()
+                Mounts:ToggleFavorite(row.mount)
+            end)
+            button:SetScript("OnEnter", function()
+                if GameTooltip then
+                    GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(Mounts:IsFavorite(row.mount) and "Remove from favorites" or "Add to favorites")
+                    GameTooltip:Show()
+                end
+            end)
+            button:SetScript("OnLeave", function()
+                if GameTooltip then
+                    GameTooltip:Hide()
+                end
+            end)
+
+            row.cells[column.key] = button
+        else
+            row.cells[column.key] = CreateCell(row, "GameFontHighlightSmall", xOffset, column.minWidth, column.justifyH)
+        end
 
         xOffset = xOffset + column.minWidth
     end
@@ -884,14 +1169,26 @@ function Mounts:PopulateRow(row, mount)
     local attempts = self:GetTotalAttempts(mount)
 
     row.cells.icon:SetTexture(journalInfo.icon or DEFAULT_MOUNT_ICON)
+    if self:IsFavorite(mount) then
+        row.cells.favorite.star:SetTextColor(1, 0.82, 0, 1)
+    else
+        row.cells.favorite.star:SetTextColor(0.45, 0.45, 0.45, 1)
+    end
     row.cells.name:SetText(DisplayText(mount.name))
-    row.cells.expansion:SetText(DisplayText(mount.expansion))
+    if self.viewMode == "farming" then
+        row.cells.expansion:SetText(DisplayText(mount.bossName))
+        row.cells.collected:SetText("")
+        row.cells.collected:SetTextColor(1, 1, 1, 1)
+    else
+        row.cells.expansion:SetText(DisplayText(mount.expansion))
+        row.cells.collected:SetText(journalInfo.collectedStatus)
+        self:SetStatusColor(row.cells.collected, journalInfo.collectedStatus)
+    end
+
     row.cells.sourceType:SetText(DisplayText(mount.sourceType))
     row.cells.sourceName:SetText(DisplayText(mount.sourceName))
     row.cells.dropChance:SetText(DisplayDropChance(mount.dropChance))
-    row.cells.collected:SetText(journalInfo.collectedStatus)
     row.cells.attempts:SetText(tostring(attempts))
-    self:SetStatusColor(row.cells.collected, journalInfo.collectedStatus)
 
     if journalInfo.collectedStatus == "Collected" then
         row:SetAlpha(0.72)
@@ -903,7 +1200,6 @@ function Mounts:PopulateRow(row, mount)
 end
 
 function Mounts:BuildDetailsText(mount, journalInfo)
-    local attempts = self:GetTotalAttempts(mount)
     local details = {}
     local dropChance = FormatDropChance(mount.dropChance)
 
@@ -927,7 +1223,10 @@ function Mounts:BuildDetailsText(mount, journalInfo)
         table.insert(details, DetailLine("Item ID", mount.itemID))
     end
 
-    table.insert(details, DetailLine("Total Attempts", attempts))
+    table.insert(details, DetailLine("Favorite", self:IsFavorite(mount) and "Yes" or "No"))
+
+    table.insert(details, "")
+    self:AppendTrackingDetails(details, mount, journalInfo)
     table.insert(details, "")
     table.insert(details, DetailLine("How to Obtain", mount.obtainMethod))
     table.insert(details, "")
@@ -1080,12 +1379,17 @@ function Mounts:Refresh()
     end
 
     self:UpdateFilterControls()
+    self:UpdateHeaderLabels()
     self:RefreshStats(mounts)
     self:ApplyListLayout()
 
     if self.emptyText then
         if #mounts == 0 then
-            self.emptyText:SetText("No mounts match current filters.")
+            if self.viewMode == "farming" then
+                self.emptyText:SetText("No missing favorite mounts match current filters.")
+            else
+                self.emptyText:SetText("No mounts match current filters.")
+            end
             self.emptyText:Show()
         else
             self.emptyText:Hide()
@@ -1187,14 +1491,23 @@ end
 function Mounts:UpdateFilterControls()
     self:EnsureFilterState()
 
+    local farmingView = self.viewMode == "farming"
+    local activeStatus = farmingView and "missing" or self.filters.status
+
     if self.statusButtons then
         for key, button in pairs(self.statusButtons) do
-            if key == self.filters.status then
+            if key == activeStatus then
                 button:SetButtonState("PUSHED", true)
                 button:LockHighlight()
             else
                 button:SetButtonState("NORMAL", false)
                 button:UnlockHighlight()
+            end
+
+            if farmingView then
+                button:Disable()
+            else
+                button:Enable()
             end
         end
     end
@@ -1211,6 +1524,20 @@ function Mounts:UpdateFilterControls()
         end
     end
 
+    if self.favoritesOnlyCheckbox then
+        self.favoritesOnlyCheckbox:SetChecked(farmingView or self.filters.favoritesOnly)
+
+        if farmingView then
+            self.favoritesOnlyCheckbox:Disable()
+        else
+            self.favoritesOnlyCheckbox:Enable()
+        end
+    end
+
+    if self.viewButton then
+        self.viewButton:SetText(farmingView and "View: Farming" or "View: Mounts")
+    end
+
     if self.sortButton then
         local sortOption = self:GetSortOption()
         self.sortButton:SetText("Sort: " .. sortOption.label)
@@ -1222,7 +1549,7 @@ function Mounts:CreateFilterControls(parent)
 
     local expansions = self:GetExpansionOptions()
     local expansionRows = math.max(1, math.ceil(#expansions / 4))
-    local controlsHeight = math.max(FILTER_CONTROLS_HEIGHT, 110 + (expansionRows * 20))
+    local controlsHeight = math.max(FILTER_CONTROLS_HEIGHT, 140 + (expansionRows * 20))
 
     local controlsFrame = CreateFrame("Frame", nil, parent)
     controlsFrame:SetPoint("TOPLEFT", parent, "TOPLEFT", LIST_PANEL_PADDING, -LIST_PANEL_PADDING)
@@ -1233,12 +1560,45 @@ function Mounts:CreateFilterControls(parent)
     self.sourceTypeCheckboxes = {}
     self.expansionCheckboxes = {}
 
-    CreateFilterLabel(controlsFrame, "Status", 0, 0, 46)
+    CreateFilterLabel(controlsFrame, "Search", 0, 0, 46)
+
+    local searchBox = CreateFrame("EditBox", nil, controlsFrame, "InputBoxTemplate")
+    searchBox:SetPoint("TOPLEFT", controlsFrame, "TOPLEFT", 54, -1)
+    searchBox:SetPoint("TOPRIGHT", controlsFrame, "TOPRIGHT", -252, -1)
+    searchBox:SetHeight(22)
+    searchBox:SetAutoFocus(false)
+    searchBox:SetText(self.filters.search)
+    searchBox:SetScript("OnEscapePressed", function(editBox)
+        editBox:ClearFocus()
+    end)
+    searchBox:SetScript("OnEnterPressed", function(editBox)
+        editBox:ClearFocus()
+    end)
+    searchBox:SetScript("OnTextChanged", function(editBox)
+        Mounts:SetSearchText(editBox:GetText())
+    end)
+    self.searchBox = searchBox
+
+    local viewButton = CreateFilterButton(controlsFrame, "View: Mounts", 0, 0, 112, function()
+        Mounts:ToggleViewMode()
+    end)
+    viewButton:ClearAllPoints()
+    viewButton:SetPoint("TOPRIGHT", controlsFrame, "TOPRIGHT", -132, 1)
+    self.viewButton = viewButton
+
+    local favoritesOnlyCheckbox = CreateFilterCheckbox(controlsFrame, "Favorites only", 0, 0, 96, function(button)
+        Mounts:SetFavoritesOnly(button:GetChecked())
+    end)
+    favoritesOnlyCheckbox:ClearAllPoints()
+    favoritesOnlyCheckbox:SetPoint("TOPRIGHT", controlsFrame, "TOPRIGHT", -108, 0)
+    self.favoritesOnlyCheckbox = favoritesOnlyCheckbox
+
+    CreateFilterLabel(controlsFrame, "Status", 0, -30, 46)
 
     local statusX = 50
     for _, status in ipairs(STATUS_FILTERS) do
         local statusKey = status.key
-        local button = CreateFilterButton(controlsFrame, status.label, statusX, 2, statusKey == "all" and 42 or 92, function()
+        local button = CreateFilterButton(controlsFrame, status.label, statusX, -28, statusKey == "all" and 42 or 92, function()
             Mounts:SetStatusFilter(statusKey)
         end)
 
@@ -1246,16 +1606,16 @@ function Mounts:CreateFilterControls(parent)
         statusX = statusX + (statusKey == "all" and 48 or 98)
     end
 
-    local sortButton = CreateFilterButton(controlsFrame, "Sort: Name A-Z", 300, 2, 178, function()
+    local sortButton = CreateFilterButton(controlsFrame, "Sort: Name A-Z", 300, -28, 178, function()
         Mounts:CycleSortOption()
     end)
     self.sortButton = sortButton
 
-    CreateFilterLabel(controlsFrame, "Source", 0, -28, 54)
+    CreateFilterLabel(controlsFrame, "Source", 0, -58, 54)
 
     local sourceColumnWidth = 116
     local sourceStartX = 60
-    local sourceStartY = -26
+    local sourceStartY = -56
     for index, sourceType in ipairs(self:GetSourceTypeOptions()) do
         local sourceTypeKey = sourceType
         local column = (index - 1) % 4
@@ -1267,10 +1627,10 @@ function Mounts:CreateFilterControls(parent)
         self.sourceTypeCheckboxes[sourceTypeKey] = checkbox
     end
 
-    CreateFilterLabel(controlsFrame, "Expansion", 0, -88, 74)
+    CreateFilterLabel(controlsFrame, "Expansion", 0, -118, 74)
 
     local expansionColumnWidth = 128
-    local expansionStartY = -106
+    local expansionStartY = -136
     for index, expansion in ipairs(expansions) do
         local expansionName = expansion.name
         local column = (index - 1) % 4
